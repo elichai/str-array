@@ -286,6 +286,74 @@ impl<const N: usize> Str<N> {
     }
 }
 
+impl<'a, const N: usize> FromIterator<&'a char> for Str<N> {
+    /// Converts a `char` iterator to a `Str`.
+    /// The `char` iterator is expected to be the same length as the `Str`.
+    ///
+    /// # Panic:
+    /// if the iterator yields more than [`N`] characters.
+    /// # Examples
+    /// Basic usage:
+    /// ```
+    /// # use str_array::Str;
+    /// let v: Str<10> = ['H', 'e','l','l','o',' ', '💖'].iter().collect();
+    /// assert_eq!("Hello 💖", v);
+    ///
+    ///
+    /// let res= std::panic::catch_unwind(|| {
+    /// let _: Str<2> = "Hello".chars().collect();
+    /// });
+    /// assert_eq!(*res.unwrap_err().downcast::<String>().unwrap(), "String is too long, expected 2 bytes");
+    /// // assert!(res.is_err());
+    fn from_iter<T: IntoIterator<Item=&'a char>>(iter: T) -> Self {
+        Self::from_iter(iter.into_iter().copied())
+    }
+}
+
+impl<const N: usize> FromIterator<char> for Str<N> {
+    /// Converts a `char` iterator to a `Str`.
+    /// The `char` iterator is expected to be the same length as the `Str`.
+    ///
+    /// # Panic:
+    /// if the iterator yields more than [`N`] characters.
+    /// # Examples
+    /// Basic usage:
+    /// ```
+    /// # use str_array::Str;
+    /// let v: Str<4> = "💖".chars().collect();
+    /// assert_eq!("💖", v);
+    ///
+    ///
+    /// let res= std::panic::catch_unwind(|| {
+    /// let _: Str<2> = "Hello".chars().collect();
+    /// });
+    /// assert_eq!(*res.unwrap_err().downcast::<String>().unwrap(), "String is too long, expected 2 bytes");
+    /// // assert!(res.is_err());
+    /// ```
+    fn from_iter<I: IntoIterator<Item = char>>(iter: I) -> Str<N> {
+        let mut out = [0u8; N];
+        let mut i = 0;
+        for ch in iter.into_iter() {
+            if i == N {
+                panic!("String is too long, expected {N} bytes");
+            }
+            let len = ch.len_utf8();
+            match len {
+                1 => out[i] = ch as u8,
+                _ => {
+                    let mut buf = [0u8; 4];
+                    let bytes = ch.encode_utf8(&mut buf).as_bytes();
+                    assert_eq!(bytes.len(), len);
+                    out[i..i + len].copy_from_slice(bytes);
+                }
+            }
+            i += len;
+        }
+        // Safety: We encoded the chars as UTF-8, the rest is NULL bytes which are valid UTF-8.
+        unsafe { Str::from_utf8_unchecked(out) }
+    }
+}
+
 #[inline(always)]
 const fn run_utf8_validation(v: &[u8]) -> Result<(), str::Utf8Error> {
     match str::from_utf8(v) {

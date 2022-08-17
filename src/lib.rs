@@ -8,6 +8,7 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::{borrow::Cow, boxed::Box, string::String};
+use std::cmp::Ordering;
 
 #[derive(Copy, Eq, PartialEq, Clone, Debug)]
 pub struct InvalidLength {
@@ -286,7 +287,114 @@ impl<const N: usize> Str<N> {
     }
 }
 
-impl<'a, const N: usize> FromIterator<&'a char> for Str<N> {
+/// A new type that allows you to do `iter.collect::<TryStr<N>>()`, so it will return an error
+/// if the string is not exactly the right size
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TryStr<const N: usize> {
+    Ok(Str<N>),
+    InvalidLength,
+}
+impl<const N: usize> TryStr<N> {
+    /// Returns the contained [`Ok`] value, consuming the `self` value.
+    ///
+    /// Because this function may panic, its use is generally discouraged.
+    /// Instead, prefer to use pattern matching and handle the [`InvalidLength`]
+    /// case explicitly or convert to a `Result` using [`TryStr::into_result`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is an [`InvalidLength`], with a panic message
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// # use str_array::{TryStr, Str};
+    /// let x: TryStr<5> = TryStr::Ok(Str::from_utf8(*b"Hello").unwrap());
+    /// assert_eq!(x.unwrap(), "Hello");
+    /// ```
+    ///
+    /// ```should_panic
+    /// # use str_array::TryStr;
+    /// let x: TryStr<3> = TryStr::InvalidLength;
+    /// x.unwrap(); // panics
+    /// ```
+    #[inline]
+    #[track_caller]
+    pub fn unwrap(self) -> Str<N> {
+        match self {
+            TryStr::Ok(t) => t,
+            TryStr::InvalidLength => {
+                panic!("called `TryStr::unwrap()` on an `InvalidLength` value")
+            }
+        }
+    }
+    /// Returns `true` if the result is [`Ok`].
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// # use str_array::{TryStr, Str};
+    /// let x: TryStr<5> = TryStr::Ok(Str::from_utf8(*b"Hello").unwrap());
+    /// assert_eq!(x.is_ok(), true);
+    ///
+    /// let x: TryStr<3> = TryStr::InvalidLength;
+    /// assert_eq!(x.is_ok(), false);
+    /// ```
+    #[inline]
+    pub const fn is_ok(&self) -> bool {
+        matches!(*self, TryStr::Ok(_))
+    }
+    /// Returns `true` if the result is [`InvalidLength`].
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// # use str_array::{TryStr, Str};
+    /// let x: TryStr<5> = TryStr::Ok(Str::from_utf8(*b"Hello").unwrap());
+    /// assert_eq!(x.is_err(), false);
+    ///
+    /// let x: TryStr<3> = TryStr::InvalidLength;
+    /// assert_eq!(x.is_err(), true);
+    /// ```
+    #[inline]
+    pub const fn is_err(&self) -> bool {
+        matches!(*self, TryStr::InvalidLength)
+    }
+
+    /// Converts the [`TryStr`] into a [`Result`], assigning InvalidLength::actual == usize::MAX
+    /// as we cannot easily know how much data was left in the iterator (could also be infinite iterator)
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// # use str_array::{TryStr, Str, InvalidLength};
+    /// let x: TryStr<5> = "Hello".chars().collect();
+    /// assert_eq!(x.into_result().as_deref(), Ok("Hello"));
+    ///
+    /// let x: TryStr<5> = "Hello World".chars().collect();
+    /// assert!(x.into_result().is_err())
+    /// ```
+    #[inline]
+    pub const fn into_result(self) -> Result<Str<N>, InvalidLength> {
+        match self {
+            TryStr::Ok(t) => Ok(t),
+            TryStr::InvalidLength => Err(InvalidLength {
+                expected: N,
+                actual: usize::MAX,
+            }),
+        }
+    }
+}
+
+impl<'a, const N: usize> FromIterator<&'a char> for TryStr<N> {
     /// Converts a `char` iterator to a `Str`.
     /// The `char` iterator is expected to be the same length as the `Str`.
     ///
@@ -295,22 +403,19 @@ impl<'a, const N: usize> FromIterator<&'a char> for Str<N> {
     /// # Examples
     /// Basic usage:
     /// ```
-    /// # use str_array::Str;
-    /// let v: Str<10> = ['H', 'e','l','l','o',' ', '💖'].iter().collect();
+    /// # use str_array::{TryStr, Str};
+    /// let v: Str<10> = ['H', 'e','l','l','o',' ', '💖'].iter().collect::<TryStr<10>>().unwrap();
     /// assert_eq!("Hello 💖", v);
     ///
     ///
-    /// let res= std::panic::catch_unwind(|| {
-    /// let _: Str<2> = "Hello".chars().collect();
-    /// });
-    /// assert_eq!(*res.unwrap_err().downcast::<String>().unwrap(), "String is too long, expected 2 bytes");
-    /// // assert!(res.is_err());
-    fn from_iter<T: IntoIterator<Item=&'a char>>(iter: T) -> Self {
+    /// let s: TryStr<2> = "Hello".chars().by_ref().collect();
+    /// assert!(s.is_err());
+    fn from_iter<T: IntoIterator<Item = &'a char>>(iter: T) -> Self {
         Self::from_iter(iter.into_iter().copied())
     }
 }
 
-impl<const N: usize> FromIterator<char> for Str<N> {
+impl<const N: usize> FromIterator<char> for TryStr<N> {
     /// Converts a `char` iterator to a `Str`.
     /// The `char` iterator is expected to be the same length as the `Str`.
     ///
@@ -319,23 +424,20 @@ impl<const N: usize> FromIterator<char> for Str<N> {
     /// # Examples
     /// Basic usage:
     /// ```
-    /// # use str_array::Str;
-    /// let v: Str<4> = "💖".chars().collect();
+    /// # use str_array::{Str, TryStr};
+    /// let v: Str<4> = "💖".chars().collect::<TryStr<4>>().unwrap();
     /// assert_eq!("💖", v);
     ///
     ///
-    /// let res= std::panic::catch_unwind(|| {
-    /// let _: Str<2> = "Hello".chars().collect();
-    /// });
-    /// assert_eq!(*res.unwrap_err().downcast::<String>().unwrap(), "String is too long, expected 2 bytes");
-    /// // assert!(res.is_err());
+    /// let s: TryStr<2> = "Hello".chars().collect();
+    /// assert!(s.is_err());
     /// ```
-    fn from_iter<I: IntoIterator<Item = char>>(iter: I) -> Str<N> {
+    fn from_iter<I: IntoIterator<Item = char>>(iter: I) -> Self {
         let mut out = [0u8; N];
         let mut i = 0;
         for ch in iter.into_iter() {
             if i == N {
-                panic!("String is too long, expected {N} bytes");
+                return TryStr::InvalidLength;
             }
             let len = ch.len_utf8();
             match len {
@@ -349,8 +451,11 @@ impl<const N: usize> FromIterator<char> for Str<N> {
             }
             i += len;
         }
+        if i != N {
+            return TryStr::InvalidLength;
+        }
         // Safety: We encoded the chars as UTF-8, the rest is NULL bytes which are valid UTF-8.
-        unsafe { Str::from_utf8_unchecked(out) }
+        unsafe { TryStr::Ok(Str::from_utf8_unchecked(out)) }
     }
 }
 
@@ -538,6 +643,23 @@ macro_rules! impl_eq {
                 <str as PartialEq>::eq(self.as_ref(), other.as_ref())
             }
         }
+        #[allow(unused_lifetimes)]
+        #[allow(clippy::extra_unused_lifetimes)]
+        impl<'a, const N: usize> PartialOrd<$other> for Str<N> {
+            #[inline]
+            fn partial_cmp(&self, other: &$other) -> Option<core::cmp::Ordering> {
+                <str as PartialOrd>::partial_cmp(self.as_ref(), other.as_ref())
+            }
+        }
+
+        #[allow(unused_lifetimes)]
+        #[allow(clippy::extra_unused_lifetimes)]
+        impl<'a, const N: usize> PartialOrd<Str<N>> for $other {
+            #[inline]
+            fn partial_cmp(&self, other: &Str<N>) -> Option<core::cmp::Ordering> {
+                <str as PartialOrd>::partial_cmp(self.as_ref(), other.as_ref())
+            }
+        }
     };
 }
 
@@ -551,6 +673,26 @@ impl_eq! { String }
 impl_eq! { &'a String }
 #[cfg(feature = "alloc")]
 impl_eq! { Box<str> }
+
+impl<const N: usize, const T: usize> PartialOrd<Str<T>> for Str<N> {
+    #[inline]
+    fn partial_cmp(&self, other: &Str<T>) -> Option<core::cmp::Ordering> {
+        <str as PartialOrd>::partial_cmp(self.as_ref(), other.as_ref())
+    }
+}
+impl<const N: usize> Ord for Str<N> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        <str as Ord>::cmp(self.as_ref(), other.as_ref())
+    }
+}
+impl<const N: usize, const T: usize> PartialEq<Str<T>> for Str<N> {
+    #[inline]
+    fn eq(&self, other: &Str<T>) -> bool {
+        T == N && <str as PartialEq>::eq(self.as_ref(), other.as_ref())
+    }
+}
+impl<const N: usize> Eq for Str<N> {}
 
 impl<const N: usize> fmt::Display for Str<N> {
     #[inline]
